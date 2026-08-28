@@ -1,183 +1,172 @@
 # High-Scale Talking Presenter Video Processing Pipeline
 
-An end-to-end, high-throughput data processing and filtering pipeline designed to prepare high-quality, standardized 4-second (100-frame @ 25 FPS) talking-presenter video clips from raw in-the-wild YouTube footage for motion synthesis and audio-driven generative modeling.
+An end-to-end, high-throughput data processing and filtering pipeline designed to prepare standardized 4-second (100-frame @ 25 FPS) talking-presenter video clips from in-the-wild YouTube footage for motion synthesis and audio-driven generative modeling.
 
 ---
 
 ## ⚙️ System Prerequisites & Dependencies
 
-* **System Binaries:** `ffmpeg` and `ffprobe` must be installed on the system and accessible via `$PATH`.
-* **Hardware:** A CUDA-compatible GPU is strongly recommended for Stages 1 and 2 (YOLO pose inference & batch video auditing).
+* **System Binaries:** `ffmpeg` and `ffprobe` must be installed and accessible via `$PATH`.
+* **Hardware:** A CUDA-compatible GPU is required for Stage 1 (YOLO pose inference & tracking).
 * **Python Environment:** Python 3.10+ with `torch`, `torchvision`, `ultralytics`, `duckdb`, `pyarrow`, `pandas`, `opencv-python`, and `pytube`.
 
 ---
 
 ## 🚀 Pipeline Architecture Overview
 
-The pipeline is organized into modular, deterministic stages designed to scale across HPC clusters with SLURM job scheduling and Parquet-based metadata management:
-
-```
-[Raw YouTube IDs List (~20k IDs) - Alireza Javanmardi / process-talkingpose]
+```text
+[Raw YouTube IDs (~20k IDs) - Alireza Javanmardi / process-talkingpose]
           │
-          ▼ (1. Ingestion: pytube_download_v2.py @ 1080p -> 720p -> >=720p)
+          ▼ (Data Ingestion: pytube_download_v2.py @ 1080p -> 720p -> >=720p)
 [Raw In-the-Wild Source Videos]
           │
-          ▼ ─── Stage 0: AV Standardization (25 FPS CFR, 16kHz Mono Audio)
-[Standardized Source Videos (25 FPS, 16kHz Audio)]
+          ▼ ─── Stage 0: AV Normalization (25 FPS CFR, 16kHz Mono Audio)
+[Standardized 25 FPS Videos]
           │
-          ▼ ─── Stage 1.1: YOLO Pose Tracking & Temporal Segmentation
-[Stage 1 Manifest (stage1_manifest.parquet)]
+          ▼ ─── Stage 1: Presenter Detection, Keypoints & Integrated Crop Geometry
+[stage1_manifest.parquet (Contains temporal bounds & integrated (bx, by, b_side))]
           │
-          ▼ ─── Stage 1.2: Dynamic Crop Geometry & Arm-Reach Optimization
-[Consolidated Stage 1 Metadata (crop_geometry.parquet & consolidated manifest)]
+          ▼ ─── Stage 2.1: 100-Frame Window Slicing (CPU, Metadata-Only)
+[render_manifest.parquet (Train / Val / Test Hashed Splits)]
           │
-          ▼ ─── Stage 2.1: 100-Frame Window Slicing & Speaker-Aware Split
-[Render Manifest (render_manifest.parquet - Train / Val / Test Assignment)]
-          │
-          ▼ ─── Stage 2.2: Distributed Rendering & 512x512 Normalization
-[Final Rendered Dataset: 100-frame Clips @ 512x512 + Synchronized 16kHz Audio]
+          ▼ ─── Stage 2.2: Distributed AV-Muxed Rendering (FFmpeg)
+[Final Rendered Clips: 100-frame MP4 @ 512x512 + 16kHz Audio]
 
 ```
 
 ---
 
-## 📦 Stage-by-Stage Breakdown (Inputs, Outputs & Operations)
+## 📦 Stage-by-Stage Breakdown (Inputs, Outputs & Execution)
 
-### 1. Data Ingestion & Download (`pytube_download_v2.py`)
+### Ingestion: Data Ingestion & Download (`pytube_download_v2.py`)
 
-* **Inputs:**
-* CSV/Text file of raw YouTube video IDs (curated list by **Alireza Javanmardi** — [GitHub: ajavanmardii](https://github.com/ajavanmardii) / [DFKI Gitlab: process-talkingpose](https://git.opendfki.de/alireza.javanmardi/process-talkingpose)).
-* Output directory path for raw videos.
-
-
-* **Execution Command:**
+* **Description:** Downloads videos from a list of YouTube identifiers curated by **Alireza Javanmardi** ([GitHub: ajavanmardii](https://github.com/ajavanmardii) / [DFKI Gitlab: process-talkingpose](https://git.opendfki.de/alireza.javanmardi/process-talkingpose)).
+* **Inputs:** CSV / text file with YouTube IDs (one per row).
+* **Outputs:** Raw video files in native definitions.
+* **Resolution Strategy:** Tries `1080p` $\rightarrow$ `720p` $\rightarrow$ highest available resolution $\ge$ `720p`.
+* **Execution:**
 
 ```bash
-python pytube_download_v2.py /path/to/ids.csv /path/to/raw_videos
+python pytube_download_v2.py ids/missing_ids.csv /path/to/raw_videos
 
 ```
 
-* **Operations:**
-* Prioritized stream downloading: **1080p** $\rightarrow$ **720p** $\rightarrow$ **highest available $\ge$ 720p**.
-* Integrity validation to drop private/unavailable streams and corrupted video containers.
+---
 
+### Stage 0: Audio-Visual Normalization (`normalize_raw_videos.py`)
 
-* **Outputs:**
-* High-resolution raw MP4 video files in arbitrary native frame rates and audio configurations.
+* **Description:** Normalizes variable frame rate streams to standard formats to eliminate synchronization drift.
+* **Inputs:** Raw downloaded video directory (`/path/to/raw_videos/*.mp4`).
+* **Outputs:** 25.0 FPS Constant Frame Rate (CFR) MP4 videos with 16 kHz mono audio.
+* **Execution:**
 
+```bash
+python normalize_raw_videos.py \
+    --input-dir /path/to/raw_videos \
+    --output-dir /netscratch/bahrami/dataset/talking_pose_25fps \
+    --fps 25.0 \
+    --audio-sr 16000
 
+```
 
 ---
 
-### Stage 0: Audio-Visual Normalization
+### Stage 1: Presenter Detection, Keypoints & Integrated Crop Geometry (`stage1_detect.py`)
 
-* **Inputs:**
-* Directory containing raw downloaded videos (`/path/to/raw_videos/*.mp4`).
-
-
-* **Operations:**
-* Constant Frame Rate conversion (**CFR 25.0 FPS**) to resolve variable frame rate (VFR) drift.
-* Audio stream extraction and resampling to **16 kHz mono (single-channel)**.
-
-
+* **Description:** Executes YOLO-Pose presenter detection, temporal segment boundary extraction, COCO-17 keypoint tracking, and pre-computes static square body-crop geometry `(bx, by, b_side)` directly in a single integrated pass. (Metadata out, NO video out).
+* **Inputs:** Standardized 25.0 FPS CFR videos from Stage 0.
 * **Outputs:**
-* Standardized source videos ready for continuous keypoint tracking and frame-accurate seeking.
+1. `stage1_manifest.parquet`: Segment metadata, boundary frame indices, tracking metrics, and pre-calculated `(bx, by, b_side)` body crops.
+2. `stage1_keypoints.parquet`: Flattened `(N_det, 17)` keypoint trajectories per segment.
+3. `stage1_manifest_preview.csv`: Summary for quick manual inspection.
+4. `stage1_run.json`: Parameter hashes, runtime configurations, and summary statistics.
 
 
+* **Execution:**
+
+```bash
+python stage1_detect.py \
+    --input-dir /netscratch/bahrami/dataset/talking_pose_25fps \
+    --output-dir /netscratch/bahrami/dataset/stage1_meta \
+    --num-workers 6 \
+    --frame-stride 4 \
+    --batch-size 64 \
+    --half
+
+```
 
 ---
 
-### Stage 1.1: Presenter Tracking & Temporal Segmentation
+### Stage 2.1: Window Slicing & Speaker-Aware Splitting (`build_windows_table.py`)
 
-* **Inputs:**
-* Standardized source videos from Stage 0.
-* YOLOv8-Pose model checkpoint (`yolov8s-pose.pt`).
+* **Description:** Slices valid segments from Stage 1 into non-overlapping 100-frame temporal windows (4.0s @ 25 FPS), propagates spatial crop bounds `(bx, by, b_side)`, and assigns leak-free speaker-hashed train/val/test splits (CPU, metadata-only, no FFmpeg).
+* **Inputs:** `stage1_manifest.parquet` (columns: `segment_uid`, `path`, `start_frame`, `end_frame`, `bx`, `by`, `b_side`, `speaker_cluster_id`).
+* **Outputs:** `render_manifest.parquet` (columns: `window_uid`, `start_frame_abs`, `split`, `bx`, `by`, `b_side`, `path`, etc.).
+* **Execution:**
 
+```bash
+python build_windows_table.py \
+    --manifest /netscratch/bahrami/dataset/stage1_meta/stage1_manifest.parquet \
+    --out /netscratch/bahrami/dataset/stage1_meta/render_manifest.parquet \
+    --window-len 100 \
+    --stride 100
 
-* **Operations:**
-* Runs presenter pose estimation and tracks body landmarks across continuous video streams.
-* Detects uninterrupted temporal segments featuring a single, active, visible presenter.
-* Discards shot cuts, multi-person frames, severe occlusions, and sudden presenter dropouts.
-
-
-* **Outputs:**
-* `stage1_manifest.parquet`: Tabular metadata listing valid segment start/end frames, keypoint coordinate summaries, and speaker cluster identifiers (`speaker_cluster_id`).
-
-
+```
 
 ---
 
-### Stage 1.2: Dynamic Crop Geometry & Arm-Reach Optimization
+### Stage 2.2: Distributed AV-Muxed Rendering (`stage2_render_single.py`)
 
-* **Inputs:**
-* `stage1_manifest.parquet` from Stage 1.1.
-* Extracted keypoint tracks for upper-body joints (head, shoulders, elbows, wrists).
-
-
-* **Operations:**
-* Computes stable, square bounding boxes `(bx, by, b_side)` around the presenter's upper body.
-* Expands and centers the crop box according to maximal wrist extensions and arm movements to prevent hand gestures from clipping out of the frame.
-* Consolidates bounding records with the main segment manifest using DuckDB.
-
-
+* **Description:** Executes high-throughput video/audio clipping and spatial cropping from 25 FPS source videos into standalone 100-frame (4-second) MP4 clips with embedded audio in a single container.
+* **Inputs:** `render_manifest.parquet` and Stage 0 normalized source videos.
 * **Outputs:**
-* `crop_geometry.parquet` & `stage1_manifest_consolidated.parquet`: Consolidated manifest with spatial crop parameters ready for rendering.
+* Rendered clips stored as: `<out-root>/<window_uid[:2]>/<window_uid>/video.mp4` (512×512, 25 FPS, 100 frames, H.264 + 16kHz AAC mono audio).
+* Status logs: `<status-dir>/part-<task_id>.parquet`.
 
 
+* **Execution (Single Node / Test):**
 
----
+```bash
+python stage2_render_single.py \
+    --manifest /netscratch/bahrami/dataset/stage1_meta/render_manifest.parquet \
+    --out-root /netscratch/bahrami/dataset/stage2_clips \
+    --status-dir /netscratch/bahrami/dataset/stage2_meta/status \
+    --workers 16
 
-### Stage 2.1: 100-Frame Window Slicing & Speaker-Aware Dataset Splitting
+```
 
-* **Inputs:**
-* `stage1_manifest_consolidated.parquet`.
-* Window configuration parameters (Length: 100 frames / 4.0 seconds, Stride: 100 frames).
+* **Execution (Distributed SLURM Array):**
 
+```bash
+# Inside SLURM script (#SBATCH --array=0-99):
+python stage2_render_single.py \
+    --manifest /netscratch/bahrami/dataset/stage1_meta/render_manifest.parquet \
+    --out-root /netscratch/bahrami/dataset/stage2_clips \
+    --status-dir /netscratch/bahrami/dataset/stage2_meta/status \
+    --task-id ${SLURM_ARRAY_TASK_ID} \
+    --num-tasks 100 \
+    --workers 16
 
-* **Operations:**
-* Slices continuous presenter segments into exact non-overlapping 100-frame training windows.
-* Assigns deterministic data partitions (**Train 85% / Val 10% / Test 5%**) using cryptographic hashing on `speaker_cluster_id` to strictly prevent identity leakage across splits.
-
-
-* **Outputs:**
-* `render_manifest.parquet`: Full render table containing global frame offsets, audio seek timestamps, exact crop coordinates, and `split` assignments for every 100-frame sample.
-
-
-
----
-
-### Stage 2.2: Distributed Rendering & 512×512 Normalization
-
-* **Inputs:**
-* `render_manifest.parquet`.
-* Standardized Stage 0 source video files.
-
-
-* **Operations:**
-* High-throughput distributed FFmpeg rendering executing spatial cropping `(crop=b_side:b_side:bx:by)` and Lanczos resampling to $512 \times 512$ square resolution.
-* Synchronous extraction of the corresponding 4.0-second 16 kHz AAC audio stream.
-* Sharded file placement across 2-character prefix hash directories to maintain fast filesystem I/O on HPC clusters.
-
-
-* **Outputs:**
-* Final dataset of standardized MP4 video clips (`rendered/<split>/<prefix>/<window_uid>/video.mp4`): 512×512 @ 25 FPS with embedded 16 kHz mono audio.
-
-
+```
 
 ---
 
 ## 🛠️ Quality Assurance & Auditing
 
-* **Inputs:** Rendered video clips directory (`/netscratch/bahrami/dataset/stage2_clips`).
-* **Tool:** `audit_exact_10k_stride1.py`
-* **Operations:** Evaluates all 100 frames per clip on a random sample of 10,000 clips using batch GPU inference with YOLO to identify presenter presence, empty frames, and dropout ratios.
-* **Outputs:** `exact_audit_10k_results.csv` and detailed dataset distribution metrics.
+* **Tool:** `audit_stage2.py`
+* **Description:** Performs frame-by-frame presence auditing on 10,000 random rendered clips using batch YOLO inference to guarantee complete presenter visibility across all 100 frames.
+* **Execution:**
+
+```bash
+python audit_stage2.py
+
+```
 
 ---
 
 ## 💻 Tech Stack
 
-* **Core:** Python 3.10+, PyTorch, Torchvision, Ultralytics YOLO
+* **Core:** Python 3.10+, PyTorch, Ultralytics YOLO
 * **Media Processing:** FFmpeg, FFprobe, OpenCV, PyTube
 * **Data & Metadata:** DuckDB, Apache Arrow / PyArrow, Pandas
 * **Infrastructure:** SLURM HPC Cluster, SquashFS Containerization
