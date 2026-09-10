@@ -28,7 +28,7 @@ Outputs:
 
 Usage Examples:
   # 1. Single-node local test / Pilot run (first 500 samples):
-  python stage2_render_single.py \
+  python stage2.2_render.py \
       --manifest render_manifest.parquet \
       --out-root /path/to/rendered_chunks \
       --status-dir /path/to/status \
@@ -37,7 +37,7 @@ Usage Examples:
 
   # 2. SLURM Array Execution (Multi-Node / Multi-Core):
   # In your SLURM bash script (#SBATCH --array=0-99):
-    python /netscratch/bahrami/src/data_prep/stage2_render_single.py \
+    python /netscratch/bahrami/src/data_prep/stage2.2_render.py \
         --manifest   /netscratch/bahrami/dataset/stage1_metadata/render_manifest.parquet \
         --out-root   /netscratch/bahrami/dataset/stage2_chunks_512 \
         --status-dir /netscratch/bahrami/dataset/stage2_chunks_512/_status \
