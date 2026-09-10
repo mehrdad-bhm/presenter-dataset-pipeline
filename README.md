@@ -151,19 +151,6 @@ python stage2_render_single.py \
 
 ---
 
-## 🛠️ Quality Assurance & Auditing
-
-* **Tool:** `audit_stage2.py`
-* **Description:** Performs frame-by-frame presence auditing on 10,000 random rendered clips using batch YOLO inference to guarantee complete presenter visibility across all 100 frames.
-* **Execution:**
-
-```bash
-python audit_stage2.py
-
-```
-
----
-
 ## 💻 Tech Stack
 
 * **Core:** Python 3.10+, PyTorch, Ultralytics YOLO
