@@ -97,7 +97,7 @@ python stage1_detect.py \
 
 ---
 
-### Stage 2.1: Window Slicing & Speaker-Aware Splitting (`build_windows_table.py`)
+### Stage 2.1: Window Slicing & Speaker-Aware Splitting (`stg2.1_build_windows_table.py`)
 
 * **Description:** Slices valid segments from Stage 1 into non-overlapping 100-frame temporal windows (4.0s @ 25 FPS), propagates spatial crop bounds `(bx, by, b_side)`, and assigns leak-free speaker-hashed train/val/test splits (CPU, metadata-only, no FFmpeg).
 * **Inputs:** `stage1_manifest.parquet` (columns: `segment_uid`, `path`, `start_frame`, `end_frame`, `bx`, `by`, `b_side`, `speaker_cluster_id`).
@@ -105,11 +105,15 @@ python stage1_detect.py \
 * **Execution:**
 
 ```bash
-python build_windows_table.py \
-    --manifest /netscratch/bahrami/dataset/stage1_meta/stage1_manifest.parquet \
-    --out /netscratch/bahrami/dataset/stage1_meta/render_manifest.parquet \
-    --window-len 100 \
-    --stride 100
+python /path/stg2.1_build_windows_table.py \
+    --stage1-dir          /path/stage1_metadata \
+    --out-dir             /path/stage1_metadata \
+    --crop-scale          2.0 \
+    --hand-margin-frac    0.20 \
+    --min-face-size-px    100.0 \
+    --max-shoulder-tilt   0.25 \
+    --max-wrist-cutoff-frac 0.03 \
+    --window-frames       100
 
 ```
 
