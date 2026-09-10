@@ -131,7 +131,7 @@ python /path/stg2.1_build_windows_table.py \
 * **Execution (Single Node / Test):**
 
 ```bash
-python stage2_render_single.py \
+python stage2.2_render.py \
     --manifest /netscratch/bahrami/dataset/stage1_meta/render_manifest.parquet \
     --out-root /netscratch/bahrami/dataset/stage2_clips \
     --status-dir /netscratch/bahrami/dataset/stage2_meta/status \
@@ -143,7 +143,7 @@ python stage2_render_single.py \
 
 ```bash
 # Inside SLURM script (#SBATCH --array=0-99):
-python stage2_render_single.py \
+python stage2.2_render.py \
     --manifest /netscratch/bahrami/dataset/stage1_meta/render_manifest.parquet \
     --out-root /netscratch/bahrami/dataset/stage2_clips \
     --status-dir /netscratch/bahrami/dataset/stage2_meta/status \
